@@ -1,3 +1,5 @@
 *.csv
 *.xlsx
 *.pdf
+tmp/
+__pycache__/
