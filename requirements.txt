@@ -1,0 +1,10 @@
+matplotlib==3.7.5
+miceforest==6.0.3
+MIDASpy==1.4.1
+MIDASpy==1.4.1
+MissForest==4.2.3
+numpy==2.2.3
+pandas==2.2.3
+reportlab==4.2.5
+scikit_learn==1.4.2
+scipy==1.15.2
