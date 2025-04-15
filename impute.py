@@ -200,6 +200,58 @@ def do_knn(df, continuous_cols=None, discrete_cols=None, categorical_cols=None, 
     imps = [imps]
     return imps, method_info
 
+def do_scaled_knn(df, continuous_cols=None, discrete_cols=None, categorical_cols=None, n_neighbors=5, samples=1):
+    """
+    Impute missing values in a DataFrame using KNN imputation.
+    
+    Assumes:
+      - Continuous columns are numeric.
+      - Discrete columns are numeric and integer-like.
+      - Categorical columns have been label encoded (with missing values represented as np.nan).
+    
+    Parameters:
+      df (pd.DataFrame): Input DataFrame with missing values.
+      continuous_cols (list of str): Names of continuous numeric columns.
+      discrete_cols (list of str): Names of discrete numeric columns.
+      categorical_cols (list of str): Names of categorical columns.
+      n_neighbors (int): Number of neighbors for KNN imputation.
+      samples (int): Number of imputed DataFrame samples to return.
+    
+    Returns:
+      tuple: (imps, method_info)
+          - imps (list of pd.DataFrame): List of imputed DataFrames.
+          - method_info (str): String with method information (e.g., "KNN, params: n_neighbors=5").
+    """
+    # Work on a copy of the dataframe
+    df_imputed = df.copy()
+    scaler = MinMaxScaler()
+    scaled_df = scaler.fit_transform(df_imputed)
+    df_imputed = pd.DataFrame(data = scaled_df, columns=df.columns)
+    imps = scaler.inverse_transform(df_imputed)
+    df_imputed = pd.DataFrame(data=imps, columns=df.columns)
+    # Impute continuous columns
+    if continuous_cols:
+        imputer_cont = KNNImputer(n_neighbors=n_neighbors)
+        df_imputed[continuous_cols] = imputer_cont.fit_transform(df_imputed[continuous_cols])
+    
+    # Impute discrete columns and round to integer
+    if discrete_cols:
+        imputer_disc = KNNImputer(n_neighbors=n_neighbors)
+        imputed_disc = imputer_disc.fit_transform(df_imputed[discrete_cols])
+        df_imputed[discrete_cols] = np.round(imputed_disc).astype(int)
+    
+    # Impute categorical columns (assumed to be label encoded)
+    if categorical_cols:
+        imputer_cat = KNNImputer(n_neighbors=n_neighbors)
+        imputed_cat = imputer_cat.fit_transform(df_imputed[categorical_cols])
+        df_imputed[categorical_cols] = np.round(imputed_cat).astype(int)
+    
+    # Replicate the imputed DataFrame 'samples' times.
+    # Build method_info string.
+    method_info = f"KNN, params: n_neighbors={n_neighbors}"
+    imps = [imps]
+    return imps, method_info
+
 def do_mice(df, continuous_cols=None, discrete_cols=None, categorical_cols=None, 
                           iters=10, strat='normal', samples=1):
     """
@@ -764,3 +816,53 @@ def aio_simulated_missingness(df, knn_neighbors=5,
     decoded = reverse_encoding(best_imputed, encoders)
 
     return decoded, summary_table
+
+
+def simulate_missingness(df, show_missingness=False):
+    """
+    Takes a DataFrame, calculates missingness for each column, drops all rows with any missing values (df2),
+    then reintroduces missing values to df2 to match the original missingness proportions, resulting in df3.
+    Also returns a mask of artificial missing values.
+
+    Parameters:
+        df (pd.DataFrame): The input DataFrame.
+        show_missingness (bool): If True, prints the missingness percentage for each column 
+                                 in the original DataFrame and in the simulated DataFrame.
+    
+    Returns:
+        tuple: A tuple (df3, artificial_mask) where:
+            - df3 (pd.DataFrame): A new DataFrame with simulated missingness.
+            - artificial_mask (pd.DataFrame): A boolean mask indicating the positions where missing values were artificially inserted.
+    """
+    # 1. Calculate original missingness fraction for each column.
+    missing_original = df.isna().mean()
+    
+    # 2. Drop all rows with missing values to create df2.
+    df2 = df.dropna().reset_index(drop=True)
+    
+    # 3. Create df3 by copying df2.
+    df3 = df2.copy()
+    
+    # Create a mask DataFrame with the same shape as df3 to mark artificial missing values.
+    missing_mask = pd.DataFrame(False, index=df3.index, columns=df3.columns)
+    
+    # 4. Reintroduce missing values in df3 based on the original missingness proportions.
+    for col in df3.columns:
+        # Calculate the number of entries to set as missing in this column.
+        n_missing = int(round(missing_original[col] * len(df3)))
+        if n_missing > 0:
+            # Randomly select indices to set as missing.
+            missing_indices = df3.sample(n=n_missing, random_state=42).index
+            df3.loc[missing_indices, col] = np.nan
+            missing_mask.loc[missing_indices, col] = True
+
+    # 5. Optionally print missingness for each column.
+    if show_missingness:
+        missing_df3 = df3.isna().mean()
+        print("Missingness Comparison:")
+        for col in df.columns:
+            print(f"Column '{col}': Original: {missing_original[col]*100:.2f}%  \t -> \t df3: {missing_df3[col]*100:.2f}%")
+    
+    # Return the simulated DataFrame and the mask.
+    return df2, df3, missing_mask
+
