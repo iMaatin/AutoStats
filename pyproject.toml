@@ -16,7 +16,7 @@ classifiers = [
     "License :: OSI Approved :: MIT License", 
     "Operating System :: OS Independent",
 ]
-dynamic = ["long_description", "url"]
+dynamic = ["README", "urls"]
 
 [project.urls]
 "Homepage" = "https://https://github.com/iMaatin/AutoStats" 
