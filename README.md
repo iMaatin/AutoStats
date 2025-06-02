@@ -1,4 +1,6 @@
+
 # AutoStats
+![Autostats Banner](logo.png)
 
 AutoStats is a Python library designed to simplify the process of cleaning, imputing, and analyzing datasets with minimal coding effort. It provides tools for generating exploratory reports, handling missing data, and optimizing imputation methods, making it ideal for data scientists and analysts.
 

@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "AutoStats" 
+version = "0.1.0"        
+authors = [
+  { name="iMaatin", email="2012irajpour@gmail.com" },
+]
+description = "A Python package for automatic statistical analysis and imputation"
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License", 
+    "Operating System :: OS Independent",
+]
+dynamic = ["long_description", "url"]
+
+[project.urls]
+"Homepage" = "https://https://github.com/iMaatin/AutoStats" 
