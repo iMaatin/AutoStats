@@ -9,16 +9,18 @@ from reportlab.lib.utils import ImageReader
 from reportlab.lib import colors
 from datetime import datetime
 from reportlab.platypus import Table, TableStyle
-from scipy.stats import shapiro, probplot  
+from scipy.stats import shapiro, probplot 
+import os 
+import textwrap
 
-auto_version = 'alpha_1.0'
+auto_version = '0.1.0'
 
 def auto_report(df: pd.DataFrame, tresh: int = 10, output_file: str = "report.pdf", df_name: str = "Dataset") -> None:
     """
     Generate a PDF report for data exploration and analysis resized for A4 paper.
 
     The report includes:
-      - A cover page with a logo, metadata (DataFrame name, analysis date/time),
+      - A cover page with an ASCII art logo, metadata (DataFrame name, analysis date/time),
         and library version information.
       - Column categorization based on data type and uniqueness:
           * Categorical columns: non-numeric data.
@@ -48,6 +50,7 @@ def auto_report(df: pd.DataFrame, tresh: int = 10, output_file: str = "report.pd
     -------
     None
 
+    
     Example
     -------
     >>> import pandas as pd
@@ -59,6 +62,8 @@ def auto_report(df: pd.DataFrame, tresh: int = 10, output_file: str = "report.pd
     >>> generate_pdf_report_v5(df, tresh=3, output_file="example_report.pdf", df_name="Example Dataset")
     Report generated: example_report.pdf
     """
+
+
     # Define A4 page dimensions and margins
     PAGE_WIDTH, PAGE_HEIGHT = A4      # (595.27, 841.89) approximately
     margin_left = 50
@@ -111,20 +116,33 @@ def auto_report(df: pd.DataFrame, tresh: int = 10, output_file: str = "report.pd
     c.setFont("Helvetica-Bold", 16)
     c.drawCentredString(PAGE_WIDTH/2, PAGE_HEIGHT - margin_top - 30, f"Generated using AutoStats {auto_version}")
     
-    # Draw logo centered on the page.
-    logo_path = 'logo.png'
-    if logo_path:
-        try:
-            logo = ImageReader(logo_path)
-            logo_width = 200
-            logo_height = 200
-            logo_x = (PAGE_WIDTH - logo_width) / 2
-            logo_y = PAGE_HEIGHT - margin_top - logo_height - 40
-            c.drawImage(logo, logo_x, logo_y, width=logo_width, height=logo_height, preserveAspectRatio=True)
-        except Exception:
-            c.drawString(margin_left, PAGE_HEIGHT - margin_top - 200, "[Logo Not Found]")
-    
-    # Write metadata below the logo.
+    # --- ASCII Art for "AutoStats" ---
+    # Properly format the multi-line string into a list of lines
+    ascii_logo_str = """
+    *   _          _        ____  _        _       
+      / \\   _ __ | |_ ___ / ___|| |_ __ _| |_ ___ 
+     / _ \\ | | | | __/ _ \\___ \\| __/ _` | __/ __|
+    / ___ \\| |_| | || (_) |__) | || (_| | |_\\__ \\
+   /_/   \\_\\__,_|\\__\\___/____/ \\__\\__,_|\\__|___/
+    """
+    ascii_logo_lines = textwrap.dedent(ascii_logo_str).strip().split('\n')
+
+    # Set font and position for the ASCII art
+    c.setFont("Courier-Bold", 10)
+    line_height = 12
+    # Position the top of the ASCII art block
+    ascii_y_start = PAGE_HEIGHT - margin_top - 150
+    y_pos = ascii_y_start
+
+    # Draw each line of the ASCII art, centered
+    for line in ascii_logo_lines:
+        c.drawCentredString(PAGE_WIDTH / 2, y_pos, line)
+        y_pos -= line_height
+
+    # Position for the metadata, below the ASCII art.
+    metadata_start_y = y_pos - 40
+
+    # Write metadata below the ASCII art.
     c.setFont("Helvetica", 12)
     metadata = [
         f"DataFrame Name: {df_name}",
@@ -134,7 +152,7 @@ def auto_report(df: pd.DataFrame, tresh: int = 10, output_file: str = "report.pd
         "Library Versions:",
         *[f"{lib}: {ver}" for lib, ver in version_info.items()]
     ]
-    meta_y = logo_y - 40
+    meta_y = metadata_start_y
     for line in metadata:
         c.drawString(margin_left, meta_y, line)
         meta_y -= 20
@@ -239,7 +257,7 @@ def auto_report(df: pd.DataFrame, tresh: int = 10, output_file: str = "report.pd
             nulls = df[column].isna().sum()
             uniques = df[column].nunique()
             missingness = nulls / len(df) if len(df) > 0 else 0
-            _, nl_p = shapiro(df[column])
+            _, nl_p = shapiro(df[column].dropna())
             nl = nl_p > 0.05
 
             # Prepare the statistics table.
@@ -380,14 +398,14 @@ def auto_report(df: pd.DataFrame, tresh: int = 10, output_file: str = "report.pd
     print(f"Report generated: {output_file}")
 
 def manual_report(df: pd.DataFrame, categorical_cols:list, continuous_cols:list, discrete_cols:list=[],
-                 output_file: str = "report.pdf", df_name: str = "Dataset") -> None:
+                  output_file: str = "report.pdf", df_name: str = "Dataset") -> None:
     """
     Generate a PDF report for data exploration and analysis resized for A4 paper.
 
     The report includes:
-      - A cover page with a logo, metadata (DataFrame name, analysis date/time),
+      - A cover page with an ASCII art logo, metadata (DataFrame name, analysis date/time),
         and library version information.
-     
+      
       - For each column:
           * For categorical/discrete columns, a count plot is generated along with a detailed table
             of statistics and value counts.
@@ -413,17 +431,6 @@ def manual_report(df: pd.DataFrame, categorical_cols:list, continuous_cols:list,
     Returns
     -------
     None
-
-    Example
-    -------
-    >>> import pandas as pd
-    >>> df = pd.DataFrame({
-    ...     "A": [1, 2, 3, 4, 5],
-    ...     "B": ["a", "b", "a", "c", "b"],
-    ...     "C": [10, 20, 30, 40, 50]
-    ... })
-    >>> generate_pdf_report_v5(df, tresh=3, output_file="example_report.pdf", df_name="Example Dataset")
-    Report generated: example_report.pdf
     """
     # Define A4 page dimensions and margins
     PAGE_WIDTH, PAGE_HEIGHT = A4      # (595.27, 841.89) approximately
@@ -463,20 +470,33 @@ def manual_report(df: pd.DataFrame, categorical_cols:list, continuous_cols:list,
     c.setFont("Helvetica-Bold", 16)
     c.drawCentredString(PAGE_WIDTH/2, PAGE_HEIGHT - margin_top - 30, f"Generated using AutoStats {auto_version}")
     
-    # Draw logo centered on the page.
-    logo_path = 'logo.png'
-    if logo_path:
-        try:
-            logo = ImageReader(logo_path)
-            logo_width = 200
-            logo_height = 200
-            logo_x = (PAGE_WIDTH - logo_width) / 2
-            logo_y = PAGE_HEIGHT - margin_top - logo_height - 40
-            c.drawImage(logo, logo_x, logo_y, width=logo_width, height=logo_height, preserveAspectRatio=True)
-        except Exception:
-            c.drawString(margin_left, PAGE_HEIGHT - margin_top - 200, "[Logo Not Found]")
-    
-    # Write metadata below the logo.
+    # --- ASCII Art for "AutoStats" ---
+    # Properly format the multi-line string into a list of lines
+    ascii_logo_str = """
+    *   _          _        ____  _        _       
+      / \\   _ __ | |_ ___ / ___|| |_ __ _| |_ ___ 
+     / _ \\ | | | | __/ _ \\___ \\| __/ _` | __/ __|
+    / ___ \\| |_| | || (_) |__) | || (_| | |_\\__ \\
+   /_/   \\_\\__,_|\\__\\___/____/ \\__\\__,_|\\__|___/
+    """
+    ascii_logo_lines = textwrap.dedent(ascii_logo_str).strip().split('\n')
+
+    # Set font and position for the ASCII art
+    c.setFont("Courier-Bold", 10)
+    line_height = 12
+    # Position the top of the ASCII art block
+    ascii_y_start = PAGE_HEIGHT - margin_top - 150
+    y_pos = ascii_y_start
+
+    # Draw each line of the ASCII art, centered
+    for line in ascii_logo_lines:
+        c.drawCentredString(PAGE_WIDTH / 2, y_pos, line)
+        y_pos -= line_height
+
+    # Position for the metadata, below the ASCII art.
+    metadata_start_y = y_pos - 40
+
+    # Write metadata below the ASCII art.
     c.setFont("Helvetica", 12)
     metadata = [
         f"DataFrame Name: {df_name}",
@@ -486,7 +506,7 @@ def manual_report(df: pd.DataFrame, categorical_cols:list, continuous_cols:list,
         "Library Versions:",
         *[f"{lib}: {ver}" for lib, ver in version_info.items()]
     ]
-    meta_y = logo_y - 40
+    meta_y = metadata_start_y
     for line in metadata:
         c.drawString(margin_left, meta_y, line)
         meta_y -= 20
@@ -591,7 +611,7 @@ def manual_report(df: pd.DataFrame, categorical_cols:list, continuous_cols:list,
             nulls = df[column].isna().sum()
             uniques = df[column].nunique()
             missingness = nulls / len(df) if len(df) > 0 else 0
-            _, nl_p = shapiro(df[column])
+            _, nl_p = shapiro(df[column].dropna())
             nl = nl_p > 0.05
 
             # Prepare the statistics table.

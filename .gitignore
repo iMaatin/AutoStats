@@ -3,3 +3,6 @@
 *.pdf
 tmp/
 __pycache__/
+AutoStats.egg-info
+build
+dist
