@@ -1,7 +1,7 @@
 
 # AutoStats<img src='logo.png' align="right" height="139" />
 [![PyPI version](https://img.shields.io/pypi/v/AutoStats.svg)](https://pypi.org/project/AutoStats/)
-[![Python versions](https://img.shields.io/badge/python-3.8 | 3.9 | 3.10 | 3.11-blue.svg)](https://pypi.org/project/AutoStats/)
+[![Python versions](https://img.shields.io/badge/python-3.8%20%7C%203.9%20%7C%203.10%20%7C%203.11-blue.svg)](https://pypi.org/project/AutoStats/)
 [![PyPI - License](https://img.shields.io/pypi/l/AutoStats)](https://opensource.org/licenses/MIT)
 
 AutoStats is a Python library designed to simplify the process of cleaning, imputing, and analyzing datasets with minimal coding effort. It provides tools for generating exploratory reports, handling missing data, and optimizing imputation methods, making it ideal for data scientists and analysts.
