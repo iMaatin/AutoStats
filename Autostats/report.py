@@ -13,7 +13,7 @@ from scipy.stats import shapiro, probplot
 import os 
 import textwrap
 
-auto_version = '0.1.0'
+auto_version = '0.1.1'
 
 def auto_report(df: pd.DataFrame, tresh: int = 10, output_file: str = "report.pdf", df_name: str = "Dataset") -> None:
     """
