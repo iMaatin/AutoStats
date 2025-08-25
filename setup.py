@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="AutoStats",  
-    version="0.1.2",  
+    version="0.1.3",  
     author="iMaatin",
     author_email="2012irajpour@gmail.com",
     description="A Python package for automatic statistical analysis and imputation",

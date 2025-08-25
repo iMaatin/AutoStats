@@ -1,4 +1,7 @@
 ### Imports 
+import warnings
+warnings.filterwarnings("default")  # keep default until pipeline runs
+
 import numpy as np
 import pandas as pd
 from sklearn.impute import KNNImputer
@@ -11,7 +14,6 @@ from sklearn.preprocessing import LabelEncoder, MinMaxScaler
 import time
 from sklearn.metrics import mean_squared_error
 import MIDASpy as md
-
 
 def prep(df: pd.DataFrame):
     """
@@ -197,7 +199,7 @@ def do_mice(df, continuous_cols=None, discrete_cols=None, categorical_cols=None,
                 encoders[col] = None
 
     # Scale continuous columns if requested
-    if scale:
+    if scale and continuous_cols:
         scaler = MinMaxScaler()
         df_imputed[continuous_cols] = scaler.fit_transform(df_imputed[continuous_cols])
 
@@ -224,7 +226,7 @@ def do_mice(df, continuous_cols=None, discrete_cols=None, categorical_cols=None,
                 df_completed[col] = df_completed[col].map(inv_map)
 
     # Reverse scaling
-    if scale:
+    if scale and continuous_cols:
         df_completed[continuous_cols] = scaler.inverse_transform(df_completed[continuous_cols])
 
     return df_completed
@@ -260,7 +262,7 @@ def do_mf(df, continuous_cols=None, discrete_cols=None, categorical_cols=None, i
                 encoders[col] = None
 
     # Scale continuous columns
-    if scale:
+    if scale and continuous_cols:
         scaler = MinMaxScaler()
         df_imputed[continuous_cols] = scaler.fit_transform(df_imputed[continuous_cols])
 
@@ -281,7 +283,7 @@ def do_mf(df, continuous_cols=None, discrete_cols=None, categorical_cols=None, i
                 df_imputed_result[col] = df_imputed_result[col].map(inv_map)
 
     # Reverse scaling
-    if scale:
+    if scale and continuous_cols:
         df_imputed_result[continuous_cols] = scaler.inverse_transform(df_imputed_result[continuous_cols])
 
     return df_imputed_result
@@ -293,6 +295,8 @@ def do_midas(df,
              layer: list = [256, 256],
              vae: bool = True,
              samples: int = 10,
+             input_drop: float = 0.75,
+             training_epochs: int = 20,
              random_seed: float = 96):
     """
     Imputes missing values using the MIDAS model.
@@ -307,31 +311,36 @@ def do_midas(df,
       imps (list): A list of imputed dataframes, with original dtypes restored.
       method_info (str): Summary of MIDAS params used.
     """
-    # 1. One‑hot encode the categoricals
-    md_cat_data, md_cats = md.cat_conv(df[categorical_cols])
+    # 1. One-hot encode the categoricals
+    if categorical_cols:
+        md_cat_data, md_cats = md.cat_conv(df[categorical_cols])
+    else:
+        md_cat_data = pd.DataFrame(index=df.index)
+        md_cats = []
 
-    # 2. Build the “wide” DF: drop raw cats, append one‑hots
-    df_num = df.drop(columns=categorical_cols)
+    # 2. Build the “wide” DF: drop raw cats, append one-hots
+    df_num = df.drop(columns=categorical_cols) if categorical_cols else df.copy()
     data_in = pd.concat([df_num, md_cat_data], axis=1)
 
-    # 3. Record & re‑insert the NaN locations so MIDAS sees them as missing
+    # 3. Record & re-insert the NaN locations so MIDAS sees them as missing
     na_mask = data_in.isnull()
     data_in[na_mask] = np.nan
 
     # 4. Scale only the numeric columns in place
-    num_cols = discrete_cols + continuous_cols
-    scaler = MinMaxScaler()
-    data_in[num_cols] = scaler.fit_transform(data_in[num_cols])
+    num_cols = discrete_cols + continuous_cols if (discrete_cols and continuous_cols) else []
+    if num_cols:
+        scaler = MinMaxScaler()
+        data_in[num_cols] = scaler.fit_transform(data_in[num_cols])
 
     # 5. Build & train the MIDAS model
     imputer = md.Midas(
         layer_structure=layer,
         vae_layer=vae,
         seed=random_seed,
-        input_drop=0.75
+        input_drop=input_drop
     )
     imputer.build_model(data_in, softmax_columns=md_cats)
-    imputer.train_model(training_epochs=20)
+    imputer.train_model(training_epochs=training_epochs)
 
     # 6. Generate multiple imputations
     raw_imps = imputer.generate_samples(m=samples).output_list
@@ -341,16 +350,15 @@ def do_midas(df,
     imps = []
 
     for imp_df in raw_imps:
-        # 7a. inverse‑scale numeric cols
-        imp_df[num_cols] = scaler.inverse_transform(imp_df[num_cols])
+        # 7a. inverse-scale numeric cols (if any)
+        if num_cols:
+            imp_df[num_cols] = scaler.inverse_transform(imp_df[num_cols])
 
-        # 7b. decode one‑hots (before dropping them!)
+        # 7b. decode one-hots (before dropping them!)
         decoded = {}
         for i, grp in enumerate(md_cats):
-            # just in case, only keep those actually present
             present = [c for c in grp if c in imp_df.columns]
-            # idxmax → gives the dummy column name with highest prob
-            decoded[categorical_cols[i]] = imp_df[present].idxmax(axis=1)
+            decoded[categorical_cols[i]] = imp_df[present].idxmax(axis=1) if present else pd.Series([np.nan]*len(imp_df), index=imp_df.index)
 
         cat_df = pd.DataFrame(decoded, index=imp_df.index)
 
@@ -361,11 +369,12 @@ def do_midas(df,
         merged = pd.concat([base, cat_df], axis=1)
 
         # 7e. round discrete cols
-        merged[discrete_cols] = merged[discrete_cols].round().astype(int)
+        if discrete_cols:
+            merged[discrete_cols] = merged[discrete_cols].round().astype(int)
 
         imps.append(merged)
 
-    method_info = f"MIDAS, params: samples={samples}, layer={layer}, vae={vae}"
+    method_info = f"MIDAS, params: samples={samples}, layer={layer}, vae={vae}, input_drop={input_drop}, epochs={training_epochs}"
     return imps, method_info
 
 def select_best_imputations(imputed_dfs, original_df, mask_df, continuous_cols, discrete_cols, categorical_cols, method_info=None, method_names=None):
@@ -510,84 +519,147 @@ def optimize_imputation_hyperparams(imputation_func,
         best_trial: The best trial object from the study.
         best_value: The best (lowest) aggregated objective value.
     """
-    # Generate missing values and mask using the provided function.
-    # _, df_missing, mask_df = create_missings(original_df, missingness=missing_percent, random_seed=random_seed)
-
     def objective(trial):
         func_name = imputation_func.__name__
         params = {}
 
-        if func_name == "do_knn":
-            params['n_neighbors'] = trial.suggest_int("n_neighbors", 3, 15)
-            params['scale'] = trial.suggest_categorical("scale", [True, False])
-            # Run imputation on df_missing, not the original complete data.
-            imputed_df = imputation_func(df_missing, 
-                                         continuous_cols=continuous_cols, 
-                                         discrete_cols=discrete_cols, 
-                                         categorical_cols=categorical_cols, 
-                                         **params)
-            imputed_dfs = [imputed_df]
-            method_info = f"KNN, n_neighbors={params['n_neighbors']}, scale={params['scale']}"
-        elif func_name == "do_mice":
-            params['iters'] = trial.suggest_int("iters", 5, 20)
-            params['strat'] = trial.suggest_categorical("strat", ['normal', 'shap', 'fast'])
-            params['scale'] = trial.suggest_categorical("scale", [True, False])
-            imputed_df = imputation_func(df_missing,
-                                         continuous_cols=continuous_cols, 
-                                         discrete_cols=discrete_cols, 
-                                         categorical_cols=categorical_cols,
-                                         **params)
-            imputed_dfs = [imputed_df]
-            method_info = f"MICE, iters={params['iters']}, strat={params['strat']}, scale={params['scale']}"
-        elif func_name == "do_mf":
-            params['iters'] = trial.suggest_int("iters", 3, 15)
-            params['scale'] = trial.suggest_categorical("scale", [True, False])
-            imputed_df = imputation_func(df_missing,
-                                         continuous_cols=continuous_cols, 
-                                         discrete_cols=discrete_cols, 
-                                         categorical_cols=categorical_cols,
-                                         **params)
-            imputed_dfs = [imputed_df]
-            method_info = f"MissForest, iters={params['iters']}, scale={params['scale']}"
-        elif func_name == "do_midas":
- # Dynamically define the layer architecture
-            num_layers = trial.suggest_int("num_layers", 1, 3)
-            params["layer"] = [trial.suggest_categorical(f"layer_units_{i}", [64, 128, 256, 512]) for i in range(num_layers)]            
-            params['vae'] = trial.suggest_categorical("vae", [True, False])
-            params['samples'] = trial.suggest_int("samples", 5, 20)
-            imputed_dfs, method_info = imputation_func(df_missing,
-                                                       continuous_cols=continuous_cols, 
-                                                       discrete_cols=discrete_cols, 
-                                                       categorical_cols=categorical_cols,
-                                                       **params)
-            imputed_dfs = [imputed_dfs[0]]
-        else:
-            raise ValueError(f"Unsupported imputation function: {func_name}")
+        try:
+            if func_name == "do_knn":
+                # broadened search
+                params['n_neighbors'] = trial.suggest_int("n_neighbors", 1, 20)
+                params['scale'] = trial.suggest_categorical("scale", [True, False])
+                imputed_df = imputation_func(df_missing, 
+                                             continuous_cols=continuous_cols, 
+                                             discrete_cols=discrete_cols, 
+                                             categorical_cols=categorical_cols, 
+                                             **params)
+                imputed_dfs = [imputed_df]
+                method_info = f"KNN, n_neighbors={params['n_neighbors']}, scale={params['scale']}"
 
-        # Evaluate the imputed result by comparing against the original complete DataFrame.
-        _, _, aggregated_error = select_best_imputations(
-            imputed_dfs, original_df, mask_df, continuous_cols, discrete_cols, categorical_cols,
-            method_info=method_info
-        )
+            elif func_name == "do_mice":
+                # more flexible ranges and include possibility of lower iterations
+                params['iters'] = trial.suggest_int("iters", 3, 20)
+                params['strat'] = trial.suggest_categorical("strat", ['normal', 'fast'])
+                params['scale'] = trial.suggest_categorical("scale", [True, False])
+                imputed_df = imputation_func(df_missing,
+                                             continuous_cols=continuous_cols, 
+                                             discrete_cols=discrete_cols, 
+                                             categorical_cols=categorical_cols,
+                                             **params)
+                imputed_dfs = [imputed_df]
+                method_info = f"MICE, iters={params['iters']}, strat={params['strat']}, scale={params['scale']}"
 
-        if np.isnan(aggregated_error):
-            aggregated_error = 1e6
+            elif func_name == "do_mf":
+                params['iters'] = trial.suggest_int("iters", 1, 10)
+                params['scale'] = trial.suggest_categorical("scale", [True, False])
+                imputed_df = imputation_func(df_missing,
+                                             continuous_cols=continuous_cols, 
+                                             discrete_cols=discrete_cols, 
+                                             categorical_cols=categorical_cols,
+                                             **params)
+                imputed_dfs = [imputed_df]
+                method_info = f"MissForest, iters={params['iters']}, scale={params['scale']}"
 
-        return aggregated_error
+            elif func_name == "do_midas":
+                # improved search space
+                params['num_layers'] = trial.suggest_int("num_layers", 1, 4)
+                layers = []
+                for i in range(params['num_layers']):
+                    params[f"midas_layer_{i}"] = trial.suggest_categorical(f"midas_layer_{i}", [32, 64, 128, 256, 512])
+                    layers.append(params[f"midas_layer_{i}"])
+                params['layer'] = layers
 
-    study = optuna.create_study(direction="minimize")
+                # tune whether vae layer is present
+                params['vae'] = trial.suggest_categorical("vae", [True, False])
+
+                # tune input_drop (how aggressively inputs are dropped during training)
+                params['input_drop'] = trial.suggest_float("input_drop", 0.1, 0.9, step=0.05)
+
+                # tune number of training epochs (smaller for quick search, larger for final build)
+                params['training_epochs'] = trial.suggest_int("training_epochs", 5, 60)
+
+                # number of samples returned by generate_samples
+                params['samples'] = trial.suggest_int("samples", 3, 30)
+
+                # call do_midas with only the relevant params
+                call_kwargs = {
+                    "layer": params['layer'],
+                    "vae": params['vae'],
+                    "samples": params['samples'],
+                    "input_drop": params['input_drop'],
+                    "training_epochs": params['training_epochs'],
+                    "random_seed": random_seed,
+                    "continuous_cols": continuous_cols,
+                    "discrete_cols": discrete_cols,
+                    "categorical_cols": categorical_cols
+                }
+
+                result = imputation_func(df_missing, **call_kwargs)
+
+                if isinstance(result, tuple) and len(result) == 2:
+                    imps, method_info = result
+                else:
+                    method_info = f"MIDAS, layer={layers}, vae={params['vae']}, samples={params['samples']}"
+                    if isinstance(result, list):
+                        imps = result
+                    else:
+                        imps = [result]
+
+                imputed_dfs = imps if isinstance(imps, list) else [imps]
+
+            else:
+                raise ValueError(f"Unsupported imputation function: {func_name}")
+
+            # Compute aggregated error
+            _, _, aggregated_error = select_best_imputations(
+                imputed_dfs, original_df, mask_df, continuous_cols, discrete_cols, categorical_cols,
+                method_info=method_info
+            )
+
+            if np.isnan(aggregated_error):
+                aggregated_error = 1e6
+
+            return aggregated_error
+
+        except Exception as e:
+            # If any error happens inside a trial, return a large error so Optuna avoids it
+            print(f"Trial failed for {func_name} with error: {e}")
+            return 1e6
+
+    # Use a seeded sampler for reproducibility
+    sampler = optuna.samplers.TPESampler(seed=random_seed)
+    study = optuna.create_study(direction="minimize", sampler=sampler)
     study.optimize(objective, timeout=timelimit, n_trials=min_trials)
 
     best_trial = study.best_trial
     best_value = best_trial.value
 
+    # Post-process best_trial.params so caller gets a clean dict (especially for MIDAS)
+    raw_params = dict(best_trial.params)
+    processed_params = dict(raw_params)  # shallow copy
+
+    # If MIDAS was tuned, reconstruct 'layer' list from midas_layer_i params
+    midas_layer_keys = sorted([k for k in raw_params.keys() if k.startswith("midas_layer_")],
+                              key=lambda s: int(s.split("_")[-1]) if s.split("_")[-1].isdigit() else s)
+    if midas_layer_keys:
+        layers = [raw_params[k] for k in midas_layer_keys]
+        processed_params['layer'] = layers
+        # remove the midas_layer_i keys (optional)
+        for k in midas_layer_keys:
+            processed_params.pop(k, None)
+        # ensure num_layers is present
+        if 'num_layers' in raw_params:
+            processed_params['num_layers'] = raw_params['num_layers']
+        else:
+            processed_params['num_layers'] = len(layers)
+
     print("Optimization completed!")
     print("Best Trial Hyperparameters:")
-    for key, value in best_trial.params.items():
+    for key, value in processed_params.items():
         print(f"  {key}: {value}")
     print(f"Best Objective Value (aggregated error): {best_value}")
 
-    return best_trial, best_value
+    return best_trial, best_value, processed_params
 
 def run_full_pipeline(df: pd.DataFrame, 
                       simulate: bool = False,
@@ -597,8 +669,6 @@ def run_full_pipeline(df: pd.DataFrame,
                       timelimit: int = 600,
                       min_trials: int = 20,
                       random_seed: int = 96):
-    
-    
     """
     Run a complete missing data imputation pipeline with method selection, 
     hyperparameter optimization, and optional final imputation build.
@@ -681,239 +751,258 @@ def run_full_pipeline(df: pd.DataFrame,
     >>> df_missing = pd.read_csv("real_world_incomplete.csv")
     >>> imputed_df, summary = run_full_pipeline(df_missing, simulate=False)
     """
+    # Suppress warnings for the entire pipeline run
+    warnings.filterwarnings("ignore")
 
-
-    if simulate:
-        df_complete, df_missing, mask_df = simulate_missingness(
-            df, show_missingness=show_missingness, random_state=random_seed
-        )
-    else:
-        df_complete, df_missing, mask_df = create_missings(
-            df, missingness=missingness_value, random_seed=random_seed
-        )
-
-    continuous_cols, discrete_cols, categorical_cols = prep(df)
-
-    candidate_methods = {
-        "KNN": do_knn,
-        "MICE": do_mice,
-        "MissForest": do_mf,
-        "MIDAS": do_midas
-    }
-
-    best_hyperparams = {}
-
-    for method_name, imputation_func in candidate_methods.items():
-        print(f"\nOptimizing hyperparameters for {method_name}...")
-        try:
-            best_trial, best_value = optimize_imputation_hyperparams(
-                imputation_func=imputation_func,
-                original_df=df_complete,
-                df_missing=df_missing,
-                mask_df=mask_df,
-                continuous_cols=continuous_cols,
-                discrete_cols=discrete_cols,
-                categorical_cols=categorical_cols,
-                timelimit=timelimit,
-                min_trials=min_trials,
-                random_seed=random_seed
+    try:
+        if simulate:
+            df_complete, df_missing, mask_df = simulate_missingness(
+                df, show_missingness=show_missingness, random_state=random_seed
             )
-            best_hyperparams[method_name] = best_trial.params
-            print(f'Best hyperparameters for {method_name}: {best_hyperparams[method_name]} with best agg error of {best_value}')
-        except Exception as e:
-            print(f"An error occurred while optimizing {method_name}: {e}")
-            best_hyperparams[method_name] = None
-
-    imputed_dfs = []
-    method_names = []
-
-    for method in ['KNN', 'MICE', 'MissForest', 'MIDAS']:
-        val = best_hyperparams.get(method)
-        if not val:
-            continue
-        try:
-            if method == 'KNN':
-                df_knn = do_knn(df_missing, continuous_cols=continuous_cols, 
-                                discrete_cols=discrete_cols, categorical_cols=categorical_cols, 
-                                n_neighbors=val['n_neighbors'], scale=val['scale'])
-                imputed_dfs.append(df_knn)
-                method_names.append('KNN')
-
-            elif method == 'MICE':
-                df_mice = do_mice(df_missing, continuous_cols=continuous_cols, 
-                                  discrete_cols=discrete_cols, categorical_cols=categorical_cols, 
-                                  iters=val['iters'], strat=val['strat'], scale=val['scale'])
-                imputed_dfs.append(df_mice)
-                method_names.append('MICE')
-
-            elif method == 'MissForest':
-                df_mf = do_mf(df_missing, continuous_cols=continuous_cols, 
-                              discrete_cols=discrete_cols, categorical_cols=categorical_cols, 
-                              iters=val['iters'], scale=val['scale'])
-                imputed_dfs.append(df_mf)
-                method_names.append('MissForest')
-
-            elif method == 'MIDAS':
-                df_midas_list, _ = do_midas(df_missing, continuous_cols=continuous_cols,
-                                            discrete_cols=discrete_cols,
-                                            categorical_cols=categorical_cols,
-                                            layer=val['layer'], vae=val['vae'], 
-                                            samples=val['samples'])
-                imputed_dfs.extend(df_midas_list)
-                method_names.extend([f'MIDAS_{i+1}' for i in range(len(df_midas_list))])
-
-        except Exception as e:
-            print(f"Failed to impute with {method}: {e}")
-
-    best_method_per_col = {}
-    summary_list = []
-
-    for col in df_missing.columns:
-        if col in continuous_cols:
-            col_data_type = "Continuous"
-        elif col in discrete_cols:
-            col_data_type = "Discrete"
-        elif col in categorical_cols:
-            col_data_type = "Categorical"
         else:
-            col_data_type = str(df_missing[col].dtype)
+            df_complete, df_missing, mask_df = create_missings(
+                df, missingness=missingness_value, random_seed=random_seed
+            )
 
-        if mask_df[col].sum() == 0:
-            best_method_per_col[col] = None
+        continuous_cols, discrete_cols, categorical_cols = prep(df)
+
+        candidate_methods = {
+            "KNN": do_knn,
+            "MICE": do_mice,
+            "MissForest": do_mf,
+            "MIDAS": do_midas
+        }
+
+        best_hyperparams = {}
+
+        for method_name, imputation_func in candidate_methods.items():
+            print(f"\nOptimizing hyperparameters for {method_name}...")
+            try:
+                best_trial, best_value, best_params = optimize_imputation_hyperparams(
+                    imputation_func=imputation_func,
+                    original_df=df_complete,
+                    df_missing=df_missing,
+                    mask_df=mask_df,
+                    continuous_cols=continuous_cols,
+                    discrete_cols=discrete_cols,
+                    categorical_cols=categorical_cols,
+                    timelimit=timelimit,
+                    min_trials=min_trials,
+                    random_seed=random_seed
+                )
+                # store processed params so that downstream calls (especially MIDAS) get a proper 'layer' list
+                best_hyperparams[method_name] = best_params
+                print(f'Best hyperparameters for {method_name}: {best_hyperparams[method_name]} with best agg error of {best_value}')
+            except Exception as e:
+                print(f"An error occurred while optimizing {method_name}: {e}")
+                best_hyperparams[method_name] = None
+
+        imputed_dfs = []
+        method_names = []
+
+        for method in ['KNN', 'MICE', 'MissForest', 'MIDAS']:
+            val = best_hyperparams.get(method)
+            if not val:
+                continue
+            try:
+                if method == 'KNN':
+                    df_knn = do_knn(df_missing, continuous_cols=continuous_cols, 
+                                    discrete_cols=discrete_cols, categorical_cols=categorical_cols, 
+                                    n_neighbors=val.get('n_neighbors', 5), scale=val.get('scale', False))
+                    imputed_dfs.append(df_knn)
+                    method_names.append('KNN')
+
+                elif method == 'MICE':
+                    df_mice = do_mice(df_missing, continuous_cols=continuous_cols, 
+                                      discrete_cols=discrete_cols, categorical_cols=categorical_cols, 
+                                      iters=val.get('iters', 10), strat=val.get('strat', 'normal'), scale=val.get('scale', False))
+                    imputed_dfs.append(df_mice)
+                    method_names.append('MICE')
+
+                elif method == 'MissForest':
+                    df_mf = do_mf(df_missing, continuous_cols=continuous_cols, 
+                                  discrete_cols=discrete_cols, categorical_cols=categorical_cols, 
+                                  iters=val.get('iters', 5), scale=val.get('scale', False))
+                    imputed_dfs.append(df_mf)
+                    method_names.append('MissForest')
+
+                elif method == 'MIDAS':
+                    # ensure required defaults
+                    mids_layer = val.get('layer', [256, 256])
+                    mids_vae = val.get('vae', True)
+                    mids_samples = val.get('samples', 10)
+                    mids_input_drop = val.get('input_drop', 0.75)
+                    mids_epochs = val.get('training_epochs', 20)
+
+                    df_midas_list, _ = do_midas(df_missing, continuous_cols=continuous_cols,
+                                                discrete_cols=discrete_cols,
+                                                categorical_cols=categorical_cols,
+                                                layer=mids_layer, vae=mids_vae, 
+                                                samples=mids_samples,
+                                                input_drop=mids_input_drop,
+                                                training_epochs=mids_epochs,
+                                                random_seed=random_seed)
+                    imputed_dfs.extend(df_midas_list)
+                    method_names.extend([f'MIDAS_{i+1}' for i in range(len(df_midas_list))])
+
+            except Exception as e:
+                print(f"Failed to impute with {method}: {e}")
+
+        best_method_per_col = {}
+        summary_list = []
+
+        for col in df_missing.columns:
+            if col in continuous_cols:
+                col_data_type = "Continuous"
+            elif col in discrete_cols:
+                col_data_type = "Discrete"
+            elif col in categorical_cols:
+                col_data_type = "Categorical"
+            else:
+                col_data_type = str(df_missing[col].dtype)
+
+            if mask_df[col].sum() == 0:
+                best_method_per_col[col] = None
+                summary_list.append({
+                    'Column': col,
+                    'Data Type': col_data_type,
+                    'Best Method': None,
+                    'Metric': np.nan,
+                    'Error_SD': np.nan,
+                    'Max_Error': np.nan,
+                    'Min_Error': np.nan,
+                    'Within_10pct': np.nan
+                })
+                continue
+
+            metrics = []
+            error_sd = np.nan
+            max_error = np.nan
+            min_error = np.nan
+            within_10pct = np.nan
+
+            if col in continuous_cols or col in discrete_cols:
+                for df_imp in imputed_dfs:
+                    imp_vals = pd.to_numeric(df_imp[col][mask_df[col]], errors='coerce')
+                    orig_vals = pd.to_numeric(df_complete[col][mask_df[col]], errors='coerce')
+                    errors = np.abs(imp_vals - orig_vals)
+                    mae = errors.mean() if not errors.empty else np.nan
+                    metrics.append(mae)
+                best_idx = np.nanargmin(metrics)
+                best_metric = metrics[best_idx]
+
+                best_imp_vals = pd.to_numeric(imputed_dfs[best_idx][col][mask_df[col]], errors='coerce')
+                best_orig_vals = pd.to_numeric(df_complete[col][mask_df[col]], errors='coerce')
+                errors = np.abs(best_imp_vals - best_orig_vals)
+                error_sd = errors.std() if not errors.empty else np.nan
+                max_error = errors.max() if not errors.empty else np.nan
+                min_error = errors.min() if not errors.empty else np.nan
+                condition = ((best_orig_vals != 0) & (errors <= 0.1 * best_orig_vals.abs())) | \
+                            ((best_orig_vals == 0) & (errors == 0))
+                within_10pct = condition.mean() if not condition.empty else np.nan
+
+            elif col in categorical_cols or pd.api.types.is_string_dtype(df_complete[col]):
+                for df_imp in imputed_dfs:
+                    correct = (df_imp[col][mask_df[col]] == df_complete[col][mask_df[col]])
+                    acc = correct.mean() if not correct.empty else np.nan
+                    metrics.append(acc)
+                best_idx = np.nanargmax(metrics)
+                best_metric = metrics[best_idx]
+
+            else:
+                best_idx = None
+                best_metric = np.nan
+
+            best_method = method_names[best_idx] if best_idx is not None else None
+            best_method_per_col[col] = best_idx
+
             summary_list.append({
                 'Column': col,
                 'Data Type': col_data_type,
-                'Best Method': None,
-                'Metric': np.nan,
-                'Error_SD': np.nan,
-                'Max_Error': np.nan,
-                'Min_Error': np.nan,
-                'Within_10pct': np.nan
+                'Best Method': best_method,
+                'Metric': best_metric,
+                'Error_SD': error_sd,
+                'Max_Error': max_error,
+                'Min_Error': min_error,
+                'Within_10pct': within_10pct
             })
-            continue
 
-        metrics = []
-        error_sd = np.nan
-        max_error = np.nan
-        min_error = np.nan
-        within_10pct = np.nan
+        summary_table = pd.DataFrame(summary_list)
 
-        if col in continuous_cols or col in discrete_cols:
-            for df_imp in imputed_dfs:
-                imp_vals = pd.to_numeric(df_imp[col][mask_df[col]], errors='coerce')
-                orig_vals = pd.to_numeric(df_complete[col][mask_df[col]], errors='coerce')
-                errors = np.abs(imp_vals - orig_vals)
-                mae = errors.mean() if not errors.empty else np.nan
-                metrics.append(mae)
-            best_idx = np.nanargmin(metrics)
-            best_metric = metrics[best_idx]
+        best_imputed_df = df_complete.copy()
+        for col in df_complete.columns:
+            if mask_df[col].sum() > 0 and best_method_per_col[col] is not None:
+                method_idx = best_method_per_col[col]
+                best_imputed_df.loc[mask_df[col], col] = imputed_dfs[method_idx].loc[mask_df[col], col]
 
-            best_imp_vals = pd.to_numeric(imputed_dfs[best_idx][col][mask_df[col]], errors='coerce')
-            best_orig_vals = pd.to_numeric(df_complete[col][mask_df[col]], errors='coerce')
-            errors = np.abs(best_imp_vals - best_orig_vals)
-            error_sd = errors.std() if not errors.empty else np.nan
-            max_error = errors.max() if not errors.empty else np.nan
-            min_error = errors.min() if not errors.empty else np.nan
-            condition = ((best_orig_vals != 0) & (errors <= 0.1 * best_orig_vals.abs())) | \
-                        ((best_orig_vals == 0) & (errors == 0))
-            within_10pct = condition.mean() if not condition.empty else np.nan
+        # Build the final imputed DataFrame if both build and simulate are True
+        if build and simulate:
+            if df.isnull().sum().sum() == 0:
+                print("Original DataFrame has no missing values. Build is not needed.")
+                final_imputed_df = df.copy()
+            else:
+                imputed_dfs_build = []
+                method_names_build = []
 
-        elif col in categorical_cols or pd.api.types.is_string_dtype(df_complete[col]):
-            for df_imp in imputed_dfs:
-                correct = (df_imp[col][mask_df[col]] == df_complete[col][mask_df[col]])
-                acc = correct.mean() if not correct.empty else np.nan
-                metrics.append(acc)
-            best_idx = np.nanargmax(metrics)
-            best_metric = metrics[best_idx]
-
-        else:
-            best_idx = None
-            best_metric = np.nan
-
-        best_method = method_names[best_idx] if best_idx is not None else None
-        best_method_per_col[col] = best_idx
-
-        summary_list.append({
-            'Column': col,
-            'Data Type': col_data_type,
-            'Best Method': best_method,
-            'Metric': best_metric,
-            'Error_SD': error_sd,
-            'Max_Error': max_error,
-            'Min_Error': min_error,
-            'Within_10pct': within_10pct
-        })
-
-    summary_table = pd.DataFrame(summary_list)
-
-    best_imputed_df = df_complete.copy()
-    for col in df_complete.columns:
-        if mask_df[col].sum() > 0 and best_method_per_col[col] is not None:
-            method_idx = best_method_per_col[col]
-            best_imputed_df.loc[mask_df[col], col] = imputed_dfs[method_idx].loc[mask_df[col], col]
-
-    # Build the final imputed DataFrame if both build and simulate are True
-    if build and simulate:
-        if df.isnull().sum().sum() == 0:
-            print("Original DataFrame has no missing values. Build is not needed.")
-            final_imputed_df = df.copy()
-        else:
-            imputed_dfs_build = []
-            method_names_build = []
-
-            for method in ['KNN', 'MICE', 'MissForest', 'MIDAS']:
-                val = best_hyperparams.get(method)
-                if not val:
-                    continue
-                try:
-                    if method == 'KNN':
-                        df_knn_build = do_knn(df, continuous_cols=continuous_cols, 
-                                            discrete_cols=discrete_cols, categorical_cols=categorical_cols, 
-                                            n_neighbors=val['n_neighbors'], scale=val['scale'])
-                        imputed_dfs_build.append(df_knn_build)
-                        method_names_build.append('KNN')
-
-                    elif method == 'MICE':
-                        df_mice_build = do_mice(df, continuous_cols=continuous_cols, 
-                                              discrete_cols=discrete_cols, categorical_cols=categorical_cols, 
-                                              iters=val['iters'], strat=val['strat'], scale=val['scale'])
-                        imputed_dfs_build.append(df_mice_build)
-                        method_names_build.append('MICE')
-
-                    elif method == 'MissForest':
-                        df_mf_build = do_mf(df, continuous_cols=continuous_cols, 
-                                          discrete_cols=discrete_cols, categorical_cols=categorical_cols, 
-                                          iters=val['iters'], scale=val['scale'])
-                        imputed_dfs_build.append(df_mf_build)
-                        method_names_build.append('MissForest')
-
-                    elif method == 'MIDAS':
-                        df_midas_list_build, _ = do_midas(df, continuous_cols=continuous_cols,
-                                                        discrete_cols=discrete_cols,
-                                                        categorical_cols=categorical_cols,
-                                                        layer=val['layer'], vae=val['vae'], 
-                                                        samples=val['samples'],
-                                                        random_seed=random_seed)
-                        imputed_dfs_build.extend(df_midas_list_build)
-                        method_names_build.extend([f'MIDAS_{i+1}' for i in range(len(df_midas_list_build))])
-
-                except Exception as e:
-                    print(f"Failed to impute with {method} during build: {e}")
-
-            # Map method names to their imputed DataFrames
-            method_to_imp_df = dict(zip(method_names_build, imputed_dfs_build))
-            final_imputed_df = df.copy()
-            for col in df.columns:
-                if df[col].isnull().sum() > 0:
-                    col_summary = summary_table[summary_table['Column'] == col]
-                    if col_summary.empty:
+                for method in ['KNN', 'MICE', 'MissForest', 'MIDAS']:
+                    val = best_hyperparams.get(method)
+                    if not val:
                         continue
-                    best_method = col_summary['Best Method'].iloc[0]
-                    if best_method and best_method in method_to_imp_df:
-                        imp_df = method_to_imp_df[best_method]
-                        missing_mask = df[col].isnull()
-                        final_imputed_df.loc[missing_mask, col] = imp_df.loc[missing_mask, col]
+                    try:
+                        if method == 'KNN':
+                            df_knn_build = do_knn(df, continuous_cols=continuous_cols, 
+                                                discrete_cols=discrete_cols, categorical_cols=categorical_cols, 
+                                                n_neighbors=val.get('n_neighbors', 5), scale=val.get('scale', False))
+                            imputed_dfs_build.append(df_knn_build)
+                            method_names_build.append('KNN')
 
-            best_imputed_df = final_imputed_df
+                        elif method == 'MICE':
+                            df_mice_build = do_mice(df, continuous_cols=continuous_cols, 
+                                                  discrete_cols=discrete_cols, categorical_cols=categorical_cols, 
+                                                  iters=val.get('iters', 10), strat=val.get('strat', 'normal'), scale=val.get('scale', False))
+                            imputed_dfs_build.append(df_mice_build)
+                            method_names_build.append('MICE')
 
-    return best_imputed_df, summary_table
+                        elif method == 'MissForest':
+                            df_mf_build = do_mf(df, continuous_cols=continuous_cols, 
+                                              discrete_cols=discrete_cols, categorical_cols=categorical_cols, 
+                                              iters=val.get('iters', 5), scale=val.get('scale', False))
+                            imputed_dfs_build.append(df_mf_build)
+                            method_names_build.append('MissForest')
+
+                        elif method == 'MIDAS':
+                            df_midas_list_build, _ = do_midas(df, continuous_cols=continuous_cols,
+                                                            discrete_cols=discrete_cols,
+                                                            categorical_cols=categorical_cols,
+                                                            layer=val.get('layer', [256, 256]), vae=val.get('vae', True), 
+                                                            samples=val.get('samples', 10),
+                                                            input_drop=val.get('input_drop', 0.75),
+                                                            training_epochs=val.get('training_epochs', 20),
+                                                            random_seed=random_seed)
+                            imputed_dfs_build.extend(df_midas_list_build)
+                            method_names_build.extend([f'MIDAS_{i+1}' for i in range(len(df_midas_list_build))])
+
+                    except Exception as e:
+                        print(f"Failed to impute with {method} during build: {e}")
+
+                # Map method names to their imputed DataFrames
+                method_to_imp_df = dict(zip(method_names_build, imputed_dfs_build))
+                final_imputed_df = df.copy()
+                for col in df.columns:
+                    if df[col].isnull().sum() > 0:
+                        col_summary = summary_table[summary_table['Column'] == col]
+                        if col_summary.empty:
+                            continue
+                        best_method = col_summary['Best Method'].iloc[0]
+                        if best_method and best_method in method_to_imp_df:
+                            imp_df = method_to_imp_df[best_method]
+                            missing_mask = df[col].isnull()
+                            final_imputed_df.loc[missing_mask, col] = imp_df.loc[missing_mask, col]
+
+                best_imputed_df = final_imputed_df
+
+        return best_imputed_df, summary_table
+
+    finally:
+        # restore default warning behaviour after the pipeline finishes
+        warnings.filterwarnings("default")
